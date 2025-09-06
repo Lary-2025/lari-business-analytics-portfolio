@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Sistema de Detección de Anomalías en Facturación
+Autor: [Tu nombre]
+Fecha: [Fecha]
+Descripción: Sistema para identificar errores y posibles fraudes en facturación
+"""
+
+# Importación de librerías
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+# Preprocesamiento y modelado
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.metrics import classification_report, confusion_matrix
+
+# Visualización
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import matplotlib.patches as mpatches
+
+# Utilidades
+import json
+from datetime import datetime, timedelta
+import random
+
+# Configuración de estilo
+plt.style.use('seaborn-v0_8')
+sns.set_palette("husl")
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+np.random.seed(42)
+
+# Generar datos de ejemplo simulando facturación
+def generar_datos_facturacion(n_registros=10000):
+    """
+    Genera datos de ejemplo para simular un conjunto de datos de facturación
+    con algunas anomalías incorporadas para demostración.
+    """
+    # Fechas
+    fechas = pd.date_range(start='2022-01-01', end='2023-12-31', freq='D')
+    
+    # Clientes
+    clientes = [f'Cliente_{i:03d}' for i in range(1, 101)]
+    
+    # Productos y precios
+    productos = {
+        'Producto_A': 150.0,
+        'Producto_B': 85.5,
+        'Producto_C': 220.0,
+        'Producto_D': 45.0,
+        'Producto_E': 320.0,
+        'Producto_F': 125.0,
+        'Producto_G': 65.0,
+        'Producto_H': 180.0
+    }
+    
+    # Vendedores
+    vendedores = [f'Vendedor_{i:02d}' for i in range(1, 16)]
+    
+    datos = []
+    
+    # Generar transacciones normales
+    for _ in range(n_registros - 500):  # 500 serán anomalías
+        fecha = random.choice(fechas)
+        cliente = random.choice(clientes)
+        producto = random.choice(list(productos.keys()))
+        cantidad = random.randint(1, 10)
+        precio_unitario = productos[producto]
+        
+        # Aplicar descuentos ocasionales
+        if random.random() < 0.15:  # 15% de probabilidad de descuento
+            descuento = random.uniform(0.05, 0.25)
+        else:
+            descuento = 0.0
+            
+        total = cantidad * precio_unitario * (1 - descuento)
+        vendedor = random.choice(vendedores)
+        
+        datos.append({
+            'fecha': fecha,
+            'cliente': cliente,
+            'producto': producto,
+            'cantidad': cantidad,
+            'precio_unitario': precio_unitario,
+            'descuento': descuento,
+            'total': total,
+            'vendedor': vendedor,
+            'es_anomalia': 0  # Transacción normal
+        })
+    
+    # Generar anomalías (posibles fraudes/errores)
+    tipos_anomalia = [
+        'precio_anormal', 'cantidad_anormal', 'descuento_excesivo', 
+        'horario_no_laboral', 'cliente_fantasma', 'vendedor_sospechoso'
+    ]
+    
+    for _ in range(500):
+        tipo_anomalia = random.choice(tipos_anomalia)
+        fecha = random.choice(fechas)
+        cliente = random.choice(clientes)
+        producto = random.choice(list(productos.keys()))
+        vendedor = random.choice(vendedores)
+        
+        if tipo_anomalia == 'precio_anormal':
+            # Precio significativamente diferente al normal
+            precio_unitario = productos[producto] * random.uniform(0.1, 0.5) if random.random() < 0.5 else productos[producto] * random.uniform(1.5, 3.0)
+            cantidad = random.randint(1, 5)
+            descuento = 0.0
+            total = cantidad * precio_unitario
+            
+        elif tipo_anomalia == 'cantidad_anormal':
+            # Cantidad anormalmente alta
+            precio_unitario = productos[producto]
+            cantidad = random.randint(50, 100)
+            descuento = 0.0
+            total = cantidad * precio_unitario
+            
+        elif tipo_anomalia == 'descuento_excesivo':
+            # Descuento excesivo
+            precio_unitario = productos[producto]
+            cantidad = random.randint(1, 5)
+            descuento = random.uniform(0.4, 0.9)  # 40% a 90% de descuento
+            total = cantidad * precio_unitario * (1 - descuento)
+            
+        elif tipo_anomalia == 'horario_no_laboral':
+            # Transacción en fin de semana o fuera de horario
+            # Convertir fecha a día de la semana (0=lunes, 6=domingo)
+            dia_semana = fecha.weekday()
+            if dia_semana < 5:  # Es día de semana, cambiar a fin de semana
+                fecha = fecha + timedelta(days=random.randint(5-dia_semana, 6-dia_semana))
+            precio_unitario = productos[producto]
+            cantidad = random.randint(1, 5)
+            descuento = 0.0
+            total = cantidad * precio_unitario
+            
+        elif tipo_anomalia == 'cliente_fantasma':
+            # Cliente que no existe en nuestra base normal
+            cliente = f'Cliente_F_{random.randint(1000, 9999)}'
+            precio_unitario = productos[producto]
+            cantidad = random.randint(1, 5)
+            descuento = 0.0
+            total = cantidad * precio_unitario
+            
+        elif tipo_anomalia == 'vendedor_sospechoso':
+            # Vendedor que no existe en nuestra base normal
+            vendedor = f'Vendedor_S_{random.randint(100, 999)}'
+            precio_unitario = productos[producto]
+            cantidad = random.randint(1, 5)
+            descuento = 0.0
+            total = cantidad * precio_unitario
+        
+        datos.append({
+            'fecha': fecha,
+            'cliente': cliente,
+            'producto': producto,
+            'cantidad': cantidad,
+            'precio_unitario': precio_unitario,
+            'descuento': descuento,
+            'total': total,
+            'vendedor': vendedor,
+            'es_anomalia': 1,  # Marcar como anomalía
+            'tipo_anomalia': tipo_anomalia
+        })
+    
+    # Crear DataFrame y mezclar
+    df = pd.DataFrame(datos)
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+    
+    # Añadir características adicionales
+    df['dia_semana'] = df['fecha'].dt.dayofweek
+    df['mes'] = df['fecha'].dt.month
+    df['trimestre'] = df['fecha'].dt.quarter
+    df['es_fin_semana'] = (df['fecha'].dt.dayofweek >= 5).astype(int)
+    
+    return df
+
+# Clase principal para la detección de anomalías
+class DetectorAnomaliasFacturacion:
+    def __init__(self, contamination=0.05):
+        self.datos = None
+        self.scaler = StandardScaler()
+        self.modelo = IsolationForest(
+            contamination=contamination, 
+            random_state=42,
+            n_estimators=100
+        )
+        self.resultados = None
+        self.metricas = {}
+        
+    def cargar_datos(self, ruta_archivo=None):
+        """
+        Carga datos desde un archivo o genera datos de ejemplo
+        """
+        if ruta_archivo:
+            self.datos = pd.read_csv(ruta_archivo, parse_dates=['fecha'])
+            print(f"Datos cargados: {self.datos.shape[0]} registros")
+        else:
+            print("Generando datos de ejemplo...")
+            self.datos = generar_datos_facturacion()
+            print(f"Datos generados: {self.datos.shape[0]} registros")
+            
+        print(f"Rango de fechas: {self.datos['fecha'].min()} a {self.datos['fecha'].max()}")
+        print(f"Clientes: {self.datos['cliente'].nunique()}")
+        print(f"Productos: {self.datos['producto'].nunique()}")
+        print(f"Vendedores: {self.datos['vendedor'].nunique()}")
+        
+        if 'es_anomalia' in self.datos.columns:
+            anomalias = self.datos['es_anomalia'].sum()
+            print(f"Anomalías conocidas: {anomalias} ({anomalias/len(self.datos)*100:.2f}%)")
+        
+        return self.datos
+    
+    def explorar_datos(self):
+        """
+        Realiza análisis exploratorio de los datos
+        """
+        if self.datos is None:
+            print("Primero debe cargar los datos")
+            return
+            
+        print("=" * 60)
+        print("ANÁLISIS EXPLORATORIO DE DATOS")
+        print("=" * 60)
+        
+        # Estadísticas básicas
+        print("\n1. ESTADÍSTICAS DESCRIPTIVAS:")
+        print(self.datos[['cantidad', 'precio_unitario', 'descuento', 'total']].describe())
+        
+        # Visualización de distribuciones
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Distribución de Variables Numéricas', fontsize=16)
+        
+        # Histogramas
+        sns.histplot(self.datos['cantidad'], bins=30, ax=axes[0, 0], kde=True)
+        axes[0, 0].set_title('Distribución de Cantidades')
+        
+        sns.histplot(self.datos['precio_unitario'], bins=30, ax=axes[0, 1], kde=True)
+        axes[0, 1].set_title('Distribución de Precios Unitarios')
+        
+        sns.histplot(self.datos['descuento'], bins=30, ax=axes[1, 0], kde=True)
+        axes[1, 0].set_title('Distribución de Descuentos')
+        
+        sns.histplot(self.datos['total'], bins=30, ax=axes[1, 1], kde=True)
+        axes[1, 1].set_title('Distribución de Totales')
+        
+        plt.tight_layout()
+        plt.savefig('distribuciones_numericas.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Análisis por producto
+        plt.figure(figsize=(12, 6))
+        ventas_por_producto = self.datos.groupby('producto')['total'].sum().sort_values(ascending=False)
+        ventas_por_producto.plot(kind='bar', color='skyblue')
+        plt.title('Ventas Totales por Producto')
+        plt.xlabel('Producto')
+        plt.ylabel('Ventas Totales')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        plt.savefig('ventas_por_producto.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Análisis temporal
+        ventas_mensuales = self.datos.set_index('fecha').resample('M')['total'].sum()
+        plt.figure(figsize=(12, 6))
+        ventas_mensuales.plot(kind='line', marker='o', linewidth=2)
+        plt.title('Evolución de Ventas Mensuales')
+        plt.xlabel('Fecha')
+        plt.ylabel('Ventas Totales')
+        plt.grid(True, alpha=0.3)
+        plt.savefig('evolucion_ventas.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Top clientes
+        plt.figure(figsize=(12, 6))
+        top_clientes = self.datos.groupby('cliente')['total'].sum().sort_values(ascending=False).head(10)
+        top_clientes.plot(kind='bar', color='lightgreen')
+        plt.title('Top 10 Clientes por Ventas')
+        plt.xlabel('Cliente')
+        plt.ylabel('Ventas Totales')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        plt.savefig('top_clientes.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Heatmap de correlaciones
+        numeric_cols = ['cantidad', 'precio_unitario', 'descuento', 'total', 'dia_semana', 'mes']
+        plt.figure(figsize=(10, 8))
+        corr_matrix = self.datos[numeric_cols].corr()
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0)
+        plt.title('Matriz de Correlaciones')
+        plt.savefig('matriz_correlaciones.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Boxplots para detectar outliers visualmente
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        sns.boxplot(y=self.datos['cantidad'], ax=axes[0, 0])
+        axes[0, 0].set_title('Boxplot - Cantidad')
+        
+        sns.boxplot(y=self.datos['precio_unitario'], ax=axes[0, 1])
+        axes[0, 1].set_title('Boxplot - Precio Unitario')
+        
+        sns.boxplot(y=self.datos['descuento'], ax=axes[1, 0])
+        axes[1, 0].set_title('Boxplot - Descuento')
+        
+        sns.boxplot(y=self.datos['total'], ax=axes[1, 1])
+        axes[1, 1].set_title('Boxplot - Total')
+        
+        plt.tight_layout()
+        plt.savefig('boxplots_outliers.png', dpi=300, bbox_inches='tight')
+        plt.show()
+    
+    def preparar_datos(self):
+        """
+        Prepara los datos para el modelado
+        """
+        if self.datos is None:
+            print("Primero debe cargar los datos")
+            return
+            
+        # Crear copia para no modificar los originales
+        datos_ml = self.datos.copy()
+        
+        # Codificar variables categóricas
+        le_cliente = LabelEncoder()
+        le_producto = LabelEncoder()
+        le_vendedor = LabelEncoder()
+        
+        datos_ml['cliente_encoded'] = le_cliente.fit_transform(datos_ml['cliente'])
+        datos_ml['producto_encoded'] = le_producto.fit_transform(datos_ml['producto'])
+        datos_ml['vendedor_encoded'] = le_vendedor.fit_transform(datos_ml['vendedor'])
+        
+        # Seleccionar características para el modelo
+        caracteristicas = [
+            'cantidad', 'precio_unitario', 'descuento', 'total',
+            'cliente_encoded', 'producto_encoded', 'vendedor_encoded',
+            'dia_semana', 'mes', 'trimestre', 'es_fin_semana'
+        ]
+        
+        X = datos_ml[caracteristicas]
+        
+        # Escalar características
+        X_escaleado = self.scaler.fit_transform(X)
+        
+        return X_escaleado, datos_ml
+    
+    def entrenar_modelo(self):
+        """
+        Entrena el modelo de Isolation Forest
+        """
+        print("\nEntrenando modelo de Isolation Forest...")
+        
+        # Preparar datos
+        X, datos_ml = self.preparar_datos()
+        
+        # Entrenar modelo
+        self.modelo.fit(X)
+        
+        # Predecir anomalías
+        predicciones = self.modelo.predict(X)
+        scores = self.modelo.decision_function(X)
+        
+        # Almacenar resultados
+        datos_ml['prediccion_anomalia'] = predicciones
+        datos_ml['score_anomalia'] = scores
+        
+        # Convertir predicciones: 1=normal, -1=anomalía → 0=normal, 1=anomalía
+        datos_ml['es_anomalia_pred'] = (predicciones == -1).astype(int)
+        
+        self.resultados = datos_ml
+        
+        print("Modelo entrenado correctamente")
+        
+        # Calcular métricas si tenemos las anomalías reales
+        if 'es_anomalia' in datos_ml.columns:
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+            
+            y_true = datos_ml['es_anomalia']
+            y_pred = datos_ml['es_anomalia_pred']
+            
+            self.metricas = {
+                'accuracy': accuracy_score(y_true, y_pred),
+                'precision': precision_score(y_true, y_pred),
+                'recall': recall_score(y_true, y_pred),
+                'f1': f1_score(y_true, y_pred),
+                'matriz_confusion': confusion_matrix(y_true, y_pred)
+            }
+            
+            print("\nMétricas de evaluación:")
+            print(f"Accuracy: {self.metricas['accuracy']:.4f}")
+            print(f"Precision: {self.metricas['precision']:.4f}")
+            print(f"Recall: {self.metricas['recall']:.4f}")
+            print(f"F1-Score: {self.metricas['f1']:.4f}")
+            
+            # Mostrar matriz de confusión
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(self.metricas['matriz_confusion'], annot=True, fmt='d', cmap='Blues')
+            plt.title('Matriz de Confusión')
+            plt.ylabel('Real')
+            plt.xlabel('Predicción')
+            plt.savefig('matriz_confusion.png', dpi=300, bbox_inches='tight')
+            plt.show()
+        
+        return self.resultados
+    
+    def visualizar_anomalias(self):
+        """
+        Visualiza las anomalías detectadas
+        """
+        if self.resultados is None:
+            print("Primero debe entrenar el modelo")
+            return
+            
+        # Scatter plot de cantidad vs total con anomalías
+        plt.figure(figsize=(12, 8))
+        
+        # Datos normales
+        normales = self.resultados[self.resultados['es_anomalia_pred'] == 0]
+        plt.scatter(normales['cantidad'], normales['total'], 
+                   alpha=0.5, label='Normal', color='blue')
+        
+        # Anomalías
+        anomalias = self.resultados[self.resultados['es_anomalia_pred'] == 1]
+        plt.scatter(anomalias['cantidad'], anomalias['total'], 
+                   alpha=0.7, label='Anomalía', color='red', marker='x', s=100)
+        
+        plt.xlabel('Cantidad')
+        plt.ylabel('Total')
+        plt.title('Detección de Anomalías: Cantidad vs Total')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig('anomalias_cantidad_total.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Distribución de scores de anomalía
+        plt.figure(figsize=(12, 6))
+        plt.hist(self.resultados['score_anomalia'], bins=50, alpha=0.7, color='purple')
+        plt.axvline(x=0, color='red', linestyle='--', label='Umbral de decisión')
+        plt.xlabel('Score de Anomalía')
+        plt.ylabel('Frecuencia')
+        plt.title('Distribución de Scores de Anomalía')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig('distribucion_scores.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Anomalías por producto
+        anomalias_por_producto = self.resultados[self.resultados['es_anomalia_pred'] == 1]['producto'].value_counts()
+        plt.figure(figsize=(12, 6))
+        anomalias_por_producto.plot(kind='bar', color='orange')
+        plt.title('Anomalías Detectadas por Producto')
+        plt.xlabel('Producto')
+        plt.ylabel('Número de Anomalías')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        plt.savefig('anomalias_por_producto.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Anomalías por vendedor
+        anomalias_por_vendedor = self.resultados[self.resultados['es_anomalia_pred'] == 1]['vendedor'].value_counts().head(10)
+        plt.figure(figsize=(12, 6))
+        anomalias_por_vendedor.plot(kind='bar', color='coral')
+        plt.title('Top 10 Vendedores con Más Anomalías Detectadas')
+        plt.xlabel('Vendedor')
+        plt.ylabel('Número de Anomalías')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        plt.savefig('anomalias_por_vendedor.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Serie temporal de anomalías
+        anomalias_temporales = self.resultados[self.resultados['es_anomalia_pred'] == 1].set_index('fecha').resample('W').size()
+        plt.figure(figsize=(12, 6))
+        anomalias_temporales.plot(kind='line', marker='o', color='red', linewidth=2)
+        plt.title('Evolución Temporal de Anomalías Detectadas (Semanal)')
+        plt.xlabel('Fecha')
+        plt.ylabel('Número de Anomalías')
+        plt.grid(True, alpha=0.3)
+        plt.savefig('evolucion_anomalias.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Visualización PCA para reducir dimensionalidad
+        X, _ = self.preparar_datos()
+        pca = PCA(n_components=2)
+        X_pca = pca.fit_transform(X)
+        
+        plt.figure(figsize=(12, 8))
+        # Normales
+        normales_idx = self.resultados['es_anomalia_pred'] == 0
+        plt.scatter(X_pca[normales_idx, 0], X_pca[normales_idx, 1], 
+                   alpha=0.5, label='Normal', color='blue')
+        
+        # Anomalías
+        anomalias_idx = self.resultados['es_anomalia_pred'] == 1
+        plt.scatter(X_pca[anomalias_idx, 0], X_pca[anomalias_idx, 1], 
+                   alpha=0.8, label='Anomalía', color='red', marker='x', s=100)
+        
+        plt.xlabel('Componente Principal 1')
+        plt.ylabel('Componente Principal 2')
+        plt.title('Visualización de Anomalías en Espacio PCA 2D')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig('pca_anomalias.png', dpi=300, bbox_inches='tight')
+        plt.show()
+    
+    def analizar_tipos_anomalias(self):
+        """
+        Analiza los tipos de anomalías detectadas (solo para datos sintéticos)
+        """
+        if self.resultados is None or 'tipo_anomalia' not in self.resultados.columns:
+            print("No se pueden analizar tipos de anomalías en datos reales")
+            return
+            
+        # Solo para datos sintéticos con tipos de anomalía conocidos
+        if 'tipo_anomalia' in self.resultados.columns:
+            # Efectividad por tipo de anomalía
+            resultados_anomalias = self.resultados[self.resultados['es_anomalia'] == 1]
+            efectividad = resultados_anomalias.groupby('tipo_anomalia').apply(
+                lambda x: pd.Series({
+                    'total': len(x),
+                    'detectadas': x['es_anomalia_pred'].sum(),
+                    'tasa_deteccion': x['es_anomalia_pred'].mean()
+                })
+            ).reset_index()
+            
+            plt.figure(figsize=(12, 6))
+            bars = plt.bar(efectividad['tipo_anomalia'], efectividad['tasa_deteccion'] * 100, 
+                          color=['red', 'orange', 'yellow', 'green', 'blue', 'purple'])
+            plt.title('Tasa de Detección por Tipo de Anomalía')
+            plt.xlabel('Tipo de Anomalía')
+            plt.ylabel('Tasa de Detección (%)')
+            plt.xticks(rotation=45)
+            plt.grid(True, alpha=0.3, axis='y')
+            
+            # Añadir valores en las barras
+            for bar, valor in zip(bars, efectividad['tasa_deteccion'] * 100):
+                plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, 
+                        f'{valor:.1f}%', ha='center', va='bottom')
+                
+            plt.tight_layout()
+            plt.savefig('tasa_deteccion_por_tipo.png', dpi=300, bbox_inches='tight')
+            plt.show()
+            
+            return efectividad
+    
+    def generar_reporte(self):
+        """
+        Genera un reporte completo con los hallazgos
+        """
+        if self.resultados is None:
+            print("Primero debe entrenar el modelo")
+            return
+            
+        n_anomalias = self.resultados['es_anomalia_pred'].sum()
+        porcentaje_anomalias = n_anomalias / len(self.resultados) * 100
+        
+        # Calcular impacto financiero
+        total_ventas = self.resultados['total'].sum()
+        ventas_anomalias = self.resultados[self.resultados['es_anomalia_pred'] == 1]['total'].sum()
+        porcentaje_impacto = ventas_anomalias / total_ventas * 100
+        
+        # Principales características de las anomalías
+        resumen_anomalias = self.resultados[self.resultados['es_anomalia_pred'] == 1][[
+            'cantidad', 'precio_unitario', 'descuento', 'total'
+        ]].describe()
+        
+        print("=" * 60)
+        print("REPORTE DE DETECCIÓN DE ANOMALÍAS")
+        print("=" * 60)
+        print(f"Total de transacciones analizadas: {len(self.resultados):,}")
+        print(f"Anomalías detectadas: {n_anomalias} ({porcentaje_anomalias:.2f}%)")
+        print(f"Impacto financiero estimado: ${ventas_anomalias:,.2f} ({porcentaje_impacto:.2f}% del total)")
+        print("\nResumen estadístico de las anomalías detectadas:")
+        print(resumen_anomalias)
+        
+        # Top productos con anomalías
+        top_productos_anomalias = self.resultados[self.resultados['es_anomalia_pred'] == 1]['producto'].value_counts().head(5)
+        print("\nTop 5 productos con más anomalías:")
+        for producto, count in top_productos_anomalias.items():
+            print(f"  - {producto}: {count} anomalías")
+        
+        # Top vendedores con anomalías
+        top_vendedores_anomalias = self.resultados[self.resultados['es_anomalia_pred'] == 1]['vendedor'].value_counts().head(5)
+        print("\nTop 5 vendedores con más anomalías:")
+        for vendedor, count in top_vendedores_anomalias.items():
+            print(f"  - {vendedor}: {count} anomalías")
+        
+        # Guardar reporte en archivo
+        with open('reporte_anomalias.txt', 'w') as f:
+            f.write("REPORTE DE DETECCIÓN DE ANOMALÍAS EN FACTURACIÓN\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Total de transacciones analizadas: {len(self.resultados):,}\n")
+            f.write(f"Anomalías detectadas: {n_anomalias} ({porcentaje_anomalias:.2f}%)\n")
+            f.write(f"Impacto financiero estimado: ${ventas_anomalias:,.2f} ({porcentaje_impacto:.2f}% del total)\n\n")
+            
+            f.write("RESUMEN ESTADÍSTICO DE ANOMALÍAS:\n")
+            f.write(resumen_anomalias.to_string())
+            f.write("\n\n")
+            
+            f.write("TOP PRODUCTOS CON ANOMALÍAS:\n")
+            for producto, count in top_productos_anomalias.items():
+                f.write(f"  - {producto}: {count} anomalías\n")
+                
+            f.write("\nTOP VENDEDORES CON ANOMALÍAS:\n")
+            for vendedor, count in top_vendedores_anomalias.items():
+                f.write(f"  - {vendedor}: {count} anomalías\n")
+        
+        print(f"\nReporte guardado en 'reporte_anomalias.txt'")
+        
+        # Guardar anomalías detectadas en CSV para investigación
+        anomalias_detectadas = self.resultados[self.resultados['es_anomalia_pred'] == 1]
+        columnas_interes = ['fecha', 'cliente', 'producto', 'cantidad', 'precio_unitario', 
+                           'descuento', 'total', 'vendedor', 'score_anomalia']
+        anomalias_detectadas[columnas_interes].to_csv('anomalias_detectadas.csv', index=False)
+        print(f"Detalles de anomalías guardados en 'anomalias_detectadas.csv'")
+        
+        return {
+            'total_transacciones': len(self.resultados),
+            'anomalias_detectadas': n_anomalias,
+            'porcentaje_anomalias': porcentaje_anomalias,
+            'impacto_financiero': ventas_anomalias,
+            'porcentaje_impacto': porcentaje_impacto
+        }
+
+# Función principal
+def main():
+    """
+    Función principal para ejecutar el sistema completo
+    """
+    # Inicializar el detector
+    detector = DetectorAnomaliasFacturacion(contamination=0.05)
+    
+    # Cargar datos (o generar de ejemplo)
+    datos = detector.cargar_datos()  # Sin parámetros para usar datos de ejemplo
+    
+    # Explorar datos
+    detector.explorar_datos()
+    
+    # Entrenar modelo
+    resultados = detector.entrenar_modelo()
+    
+    # Visualizar anomalías
+    detector.visualizar_anomalias()
+    
+    # Analizar tipos de anomalías (solo para datos sintéticos)
+    detector.analizar_tipos_anomalias()
+    
+    # Generar reporte completo
+    reporte = detector.generar_reporte()
+    
+    print("\n¡Proceso completado! Revise los gráficos y reportes generados.")
+
+if __name__ == "__main__":
+    main()

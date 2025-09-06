@@ -1,0 +1,618 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Sistema de Forecast de Inventario
+Autor: [Tu nombre]
+Fecha: [Fecha]
+Descripción: Sistema para predecir demanda de productos y optimizar inventario
+"""
+
+# Importación de librerías
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+# Modelado estadístico
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+
+# Métricas de evaluación
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# Configuración de estilo
+plt.style.use('seaborn-v0_8')
+sns.set_palette("husl")
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+
+# Generar datos de ejemplo si no se tienen datos reales
+def generar_datos_ejemplo(n_dias=365*2, n_productos=5):
+    """
+    Genera datos de ejemplo para demostración del sistema
+    """
+    fechas = pd.date_range(start='2020-01-01', periods=n_dias, freq='D')
+    productos = [f'Producto_{i+1}' for i in range(n_productos)]
+    
+    datos = []
+    for fecha in fechas:
+        for producto in productos:
+            # Tendencia base + estacionalidad + ruido
+            tendencia = 50 + 0.05 * (fecha - fechas[0]).days
+            estacionalidad = 10 * np.sin(2 * np.pi * (fecha.dayofyear / 365))
+            ruido = np.random.normal(0, 5)
+            
+            # Añadir picos aleatorios (eventos especiales)
+            if np.random.random() < 0.02:  # 2% de probabilidad de evento
+                pico = np.random.uniform(20, 50)
+            else:
+                pico = 0
+                
+            demanda = max(0, tendencia + estacionalidad + ruido + pico)
+            
+            datos.append({
+                'fecha': fecha,
+                'producto': producto,
+                'demanda': demanda,
+                'precio': np.random.uniform(10, 100),
+                'promocion': 1 if np.random.random() < 0.1 else 0  # 10% de probabilidad de promoción
+            })
+    
+    return pd.DataFrame(datos)
+
+# Clase principal para el forecast de inventario
+class ForecastInventario:
+    def __init__(self):
+        self.datos = None
+        self.modelos = {}
+        self.pronosticos = {}
+        self.metricas = {}
+        
+    def cargar_datos(self, ruta_archivo=None):
+        """
+        Carga datos desde un archivo o genera datos de ejemplo
+        """
+        if ruta_archivo:
+            self.datos = pd.read_csv(ruta_archivo, parse_dates=['fecha'])
+        else:
+            print("Generando datos de ejemplo...")
+            self.datos = generar_datos_ejemplo()
+            
+        print(f"Datos cargados: {self.datos.shape[0]} registros")
+        print(f"Rango de fechas: {self.datos['fecha'].min()} a {self.datos['fecha'].max()}")
+        print(f"Productos: {self.datos['producto'].nunique()}")
+        
+        return self.datos
+    
+    def explorar_datos(self):
+        """
+        Realiza análisis exploratorio de los datos
+        """
+        if self.datos is None:
+            print("Primero debe cargar los datos")
+            return
+            
+        print("=" * 50)
+        print("ANÁLISIS EXPLORATORIO DE DATOS")
+        print("=" * 50)
+        
+        # Estadísticas básicas
+        print("\n1. ESTADÍSTICAS DESCRIPTIVAS:")
+        print(self.datos.groupby('producto')['demanda'].describe())
+        
+        # Visualización de la demanda por producto
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Análisis Exploratorio de la Demanda', fontsize=16)
+        
+        # Serie temporal de demanda
+        for i, producto in enumerate(self.datos['producto'].unique()[:4]):
+            ax = axes[i//2, i%2]
+            producto_data = self.datos[self.datos['producto'] == producto]
+            producto_data = producto_data.set_index('fecha').resample('W').mean()
+            
+            ax.plot(producto_data.index, producto_data['demanda'], linewidth=2)
+            ax.set_title(f'Demanda Semanal - {producto}')
+            ax.set_ylabel('Demanda')
+            ax.grid(True, alpha=0.3)
+            
+        plt.tight_layout()
+        plt.savefig('demanda_semanal.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Distribución de la demanda
+        plt.figure(figsize=(12, 6))
+        for producto in self.datos['producto'].unique():
+            producto_data = self.datos[self.datos['producto'] == producto]['demanda']
+            sns.histplot(producto_data, alpha=0.5, label=producto, kde=True)
+            
+        plt.title('Distribución de la Demanda por Producto')
+        plt.xlabel('Demanda')
+        plt.ylabel('Frecuencia')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig('distribucion_demanda.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Boxplot por producto
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(x='producto', y='demanda', data=self.datos)
+        plt.title('Distribución de Demanda por Producto')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        plt.savefig('boxplot_demanda.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Análisis de correlación entre precio y demanda
+        plt.figure(figsize=(10, 6))
+        sns.scatterplot(x='precio', y='demanda', hue='producto', data=self.datos, alpha=0.6)
+        plt.title('Relación entre Precio y Demanda')
+        plt.grid(True, alpha=0.3)
+        plt.savefig('precio_demanda.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Efecto de las promociones
+        if 'promocion' in self.datos.columns:
+            plt.figure(figsize=(10, 6))
+            promocion_effect = self.datos.groupby(['producto', 'promocion'])['demanda'].mean().reset_index()
+            sns.barplot(x='producto', y='demanda', hue='promocion', data=promocion_effect)
+            plt.title('Efecto de las Promociones en la Demanda')
+            plt.ylabel('Demanda Promedio')
+            plt.grid(True, alpha=0.3)
+            plt.savefig('efecto_promociones.png', dpi=300, bbox_inches='tight')
+            plt.show()
+    
+    def preparar_series_temporales(self, producto, frecuencia='D'):
+        """
+        Prepara la serie temporal para un producto específico
+        """
+        producto_data = self.datos[self.datos['producto'] == producto].copy()
+        producto_data = producto_data.set_index('fecha')
+        serie_temporal = producto_data['demanda'].resample(frecuencia).mean()
+        
+        # Rellenar valores missing si los hay
+        if serie_temporal.isnull().any():
+            serie_temporal = serie_temporal.interpolate(method='linear')
+            
+        return serie_temporal
+    
+    def test_estacionariedad(self, serie_temporal):
+        """
+        Realiza el test de Dickey-Fuller para evaluar estacionariedad
+        """
+        resultado = adfuller(serie_temporal.dropna())
+        
+        print('Test de Dickey-Fuller:')
+        print(f'Estadístico: {resultado[0]:.4f}')
+        print(f'p-value: {resultado[1]:.4f}')
+        print('Valores críticos:')
+        for key, value in resultado[4].items():
+            print(f'   {key}: {value:.4f}')
+            
+        if resultado[1] <= 0.05:
+            print("La serie es ESTACIONARIA (rechazamos H0)")
+            return True
+        else:
+            print("La serie NO ES ESTACIONARIA (no podemos rechazar H0)")
+            return False
+    
+    def analizar_series_temporales(self, producto):
+        """
+        Realiza análisis completo de series temporales para un producto
+        """
+        print(f"\nAnálisis de Series Temporales para {producto}")
+        print("=" * 50)
+        
+        # Preparar serie temporal
+        serie = self.preparar_series_temporales(producto, 'W')  # Usamos datos semanales
+        
+        # Test de estacionariedad
+        es_estacionaria = self.test_estacionariedad(serie)
+        
+        # Descomposición de la serie temporal
+        try:
+            descomposicion = seasonal_decompose(serie, period=12, extrapolate_trend='freq')
+            
+            fig, axes = plt.subplots(4, 1, figsize=(12, 10))
+            fig.suptitle(f'Descomposición de la Serie Temporal - {producto}', fontsize=16)
+            
+            descomposicion.observed.plot(ax=axes[0])
+            axes[0].set_ylabel('Observado')
+            axes[0].grid(True, alpha=0.3)
+            
+            descomposicion.trend.plot(ax=axes[1])
+            axes[1].set_ylabel('Tendencia')
+            axes[1].grid(True, alpha=0.3)
+            
+            descomposicion.seasonal.plot(ax=axes[2])
+            axes[2].set_ylabel('Estacionalidad')
+            axes[2].grid(True, alpha=0.3)
+            
+            descomposicion.resid.plot(ax=axes[3])
+            axes[3].set_ylabel('Residual')
+            axes[3].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(f'descomposicion_{producto}.png', dpi=300, bbox_inches='tight')
+            plt.show()
+            
+        except Exception as e:
+            print(f"Error en descomposición: {e}")
+        
+        # ACF y PACF
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        plot_acf(serie.dropna(), lags=30, ax=axes[0])
+        axes[0].set_title('Función de Autocorrelación (ACF)')
+        
+        plot_pacf(serie.dropna(), lags=30, ax=axes[1])
+        axes[1].set_title('Función de Autocorrelación Parcial (PACF)')
+        
+        plt.tight_layout()
+        plt.savefig(f'acf_pacf_{producto}.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        return serie, es_estacionaria
+    
+    def entrenar_modelo_arima(self, producto, orden=None):
+        """
+        Entrena un modelo ARIMA para el producto especificado
+        """
+        print(f"\nEntrenando modelo ARIMA para {producto}")
+        print("=" * 50)
+        
+        # Preparar datos
+        serie = self.preparar_series_temporales(producto, 'W')
+        
+        # Dividir en train y test (80-20)
+        train_size = int(len(serie) * 0.8)
+        train, test = serie.iloc[:train_size], serie.iloc[train_size:]
+        
+        # Determinar orden del modelo si no se especifica
+        if orden is None:
+            # Usaremos (1,1,1) como punto de partida para simplificar
+            # En un caso real, se haría una búsqueda grid sobre p, d, q
+            orden = (1, 1, 1)
+        
+        # Entrenar modelo
+        modelo = ARIMA(train, order=orden)
+        modelo_ajustado = modelo.fit()
+        
+        print(modelo_ajustado.summary())
+        
+        # Hacer predicciones
+        pronostico = modelo_ajustado.get_forecast(steps=len(test))
+        pronostico_media = pronostico.predicted_mean
+        pronostico_intervalo = pronostico.conf_int()
+        
+        # Calcular métricas
+        mae = mean_absolute_error(test, pronostico_media)
+        rmse = np.sqrt(mean_squared_error(test, pronostico_media))
+        mape = np.mean(np.abs((test - pronostico_media) / test)) * 100
+        
+        print(f"\nMétricas de evaluación para {producto}:")
+        print(f"MAE: {mae:.2f}")
+        print(f"RMSE: {rmse:.2f}")
+        print(f"MAPE: {mape:.2f}%")
+        
+        # Guardar modelo y métricas
+        self.modelos[producto] = modelo_ajustado
+        self.metricas[producto] = {'MAE': mae, 'RMSE': rmse, 'MAPE': mape}
+        
+        # Visualizar resultados
+        plt.figure(figsize=(12, 6))
+        plt.plot(train.index, train, label='Entrenamiento', linewidth=2)
+        plt.plot(test.index, test, label='Real', linewidth=2)
+        plt.plot(pronostico_media.index, pronostico_media, label='Pronóstico', linewidth=2, color='red')
+        plt.fill_between(pronostico_intervalo.index, 
+                         pronostico_intervalo.iloc[:, 0], 
+                         pronostico_intervalo.iloc[:, 1], 
+                         color='red', alpha=0.2, label='Intervalo de confianza')
+        
+        plt.title(f'Pronóstico de Demanda - {producto} (ARIMA)')
+        plt.xlabel('Fecha')
+        plt.ylabel('Demanda')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f'pronostico_arima_{producto}.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        return modelo_ajustado, mae, rmse, mape
+    
+    def entrenar_modelo_sarimax(self, producto, orden=None, orden_estacional=None):
+        """
+        Entrena un modelo SARIMAX para capturar estacionalidad
+        """
+        print(f"\nEntrenando modelo SARIMAX para {producto}")
+        print("=" * 50)
+        
+        # Preparar datos
+        serie = self.preparar_series_temporales(producto, 'W')
+        
+        # Dividir en train y test (80-20)
+        train_size = int(len(serie) * 0.8)
+        train, test = serie.iloc[:train_size], serie.iloc[train_size:]
+        
+        # Determinar órdenes si no se especifican
+        if orden is None:
+            orden = (1, 1, 1)
+        if orden_estacional is None:
+            orden_estacional = (1, 1, 1, 12)  # Estacionalidad anual (12 meses)
+        
+        # Entrenar modelo
+        modelo = SARIMAX(train, 
+                         order=orden, 
+                         seasonal_order=orden_estacional,
+                         enforce_stationarity=False,
+                         enforce_invertibility=False)
+        
+        modelo_ajustado = modelo.fit(disp=False)
+        
+        print(modelo_ajustado.summary())
+        
+        # Hacer predicciones
+        pronostico = modelo_ajustado.get_forecast(steps=len(test))
+        pronostico_media = pronostico.predicted_mean
+        pronostico_intervalo = pronostico.conf_int()
+        
+        # Calcular métricas
+        mae = mean_absolute_error(test, pronostico_media)
+        rmse = np.sqrt(mean_squared_error(test, pronostico_media))
+        mape = np.mean(np.abs((test - pronostico_media) / test)) * 100
+        
+        print(f"\nMétricas de evaluación para {producto}:")
+        print(f"MAE: {mae:.2f}")
+        print(f"RMSE: {rmse:.2f}")
+        print(f"MAPE: {mape:.2f}%")
+        
+        # Guardar modelo y métricas
+        self.modelos[producto] = modelo_ajustado
+        self.metricas[producto] = {'MAE': mae, 'RMSE': rmse, 'MAPE': mape}
+        
+        # Visualizar resultados
+        plt.figure(figsize=(12, 6))
+        plt.plot(train.index, train, label='Entrenamiento', linewidth=2)
+        plt.plot(test.index, test, label='Real', linewidth=2)
+        plt.plot(pronostico_media.index, pronostico_media, label='Pronóstico', linewidth=2, color='red')
+        plt.fill_between(pronostico_intervalo.index, 
+                         pronostico_intervalo.iloc[:, 0], 
+                         pronostico_intervalo.iloc[:, 1], 
+                         color='red', alpha=0.2, label='Intervalo de confianza')
+        
+        plt.title(f'Pronóstico de Demanda - {producto} (SARIMAX)')
+        plt.xlabel('Fecha')
+        plt.ylabel('Demanda')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f'pronostico_sarimax_{producto}.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        return modelo_ajustado, mae, rmse, mape
+    
+    def hacer_pronostico_futuro(self, producto, semanas=12, modelo_tipo='arima'):
+        """
+        Realiza pronósticos futuros para el producto especificado
+        """
+        if producto not in self.modelos:
+            print(f"Primero debe entrenar un modelo para {producto}")
+            return
+            
+        # Preparar datos
+        serie_completa = self.preparar_series_temporales(producto, 'W')
+        
+        # Hacer pronóstico
+        if modelo_tipo == 'arima':
+            pronostico = self.modelos[producto].get_forecast(steps=semanas)
+        else:  # sarimax
+            pronostico = self.modelos[producto].get_forecast(steps=semanas)
+            
+        pronostico_media = pronostico.predicted_mean
+        pronostico_intervalo = pronostico.conf_int()
+        
+        # Guardar pronóstico
+        self.pronosticos[producto] = {
+            'media': pronostico_media,
+            'intervalo': pronostico_intervalo
+        }
+        
+        # Visualizar pronóstico futuro
+        plt.figure(figsize=(12, 6))
+        plt.plot(serie_completa.index, serie_completa, label='Histórico', linewidth=2)
+        plt.plot(pronostico_media.index, pronostico_media, label='Pronóstico', linewidth=2, color='red')
+        plt.fill_between(pronostico_intervalo.index, 
+                         pronostico_intervalo.iloc[:, 0], 
+                         pronostico_intervalo.iloc[:, 1], 
+                         color='red', alpha=0.2, label='Intervalo de confianza')
+        
+        plt.title(f'Pronóstico Futuro de Demanda - {producto} ({semanas} semanas)')
+        plt.xlabel('Fecha')
+        plt.ylabel('Demanda')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f'pronostico_futuro_{producto}.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Crear DataFrame con el pronóstico
+        pronostico_df = pd.DataFrame({
+            'fecha': pronostico_media.index,
+            'demanda_pronosticada': pronostico_media.values,
+            'limite_inferior': pronostico_intervalo.iloc[:, 0].values,
+            'limite_superior': pronostico_intervalo.iloc[:, 1].values
+        })
+        
+        print(f"\nPronóstico para {producto} las próximas {semanas} semanas:")
+        print(pronostico_df.round(2))
+        
+        return pronostico_df
+    
+    def optimizar_inventario(self, producto, costo_almacenamiento=0.1, costo_rotura=0.5, punto_reorden=None):
+        """
+        Calcula el punto óptimo de reorden basado en el pronóstico
+        """
+        if producto not in self.pronosticos:
+            print(f"Primero debe generar un pronóstico para {producto}")
+            return
+            
+        pronostico = self.pronosticos[producto]['media']
+        intervalo = self.pronosticos[producto]['intervalo']
+        
+        # Calcular punto de reorden óptimo (simplificado)
+        # En la práctica, se usaría un modelo de inventario más sofisticado
+        demanda_promedio = pronostico.mean()
+        desviacion_estandar = (intervalo.iloc[:, 1] - intervalo.iloc[:, 0]).mean() / 2
+        
+        if punto_reorden is None:
+            # Fórmula simplificada para el punto de reorden
+            lead_time = 2  # semanas de lead time
+            punto_reorden = demanda_promedio * lead_time + 1.65 * desviacion_estandar  # Z=1.65 para 95% confianza
+        
+        # Calcular inventario óptimo
+        inventario_seguridad = 1.65 * desviacion_estandar * np.sqrt(lead_time)
+        inventario_optimo = demanda_promedio * lead_time + inventario_seguridad
+        
+        # Calcular costos
+        costo_total_almacenamiento = inventario_optimo * costo_almacenamiento
+        probabilidad_rotura = 0.05  # Asumiendo intervalo de confianza del 95%
+        costo_esperado_rotura = probabilidad_rotura * costo_rotura * demanda_promedio
+        
+        print(f"\nOptimización de Inventario para {producto}")
+        print("=" * 50)
+        print(f"Demanda promedio: {demanda_promedio:.2f}")
+        print(f"Desviación estándar: {desviacion_estandar:.2f}")
+        print(f"Punto de reorden: {punto_reorden:.2f}")
+        print(f"Inventario de seguridad: {inventario_seguridad:.2f}")
+        print(f"Inventario óptimo: {inventario_optimo:.2f}")
+        print(f"Costo total de almacenamiento: {costo_total_almacenamiento:.2f}")
+        print(f"Costo esperado por rotura: {costo_esperado_rotura:.2f}")
+        
+        # Visualizar punto de reorden
+        plt.figure(figsize=(12, 6))
+        ultimos_meses = self.preparar_series_temporales(producto, 'W').iloc[-12:]  # Últimos 3 meses
+        plt.plot(ultimos_meses.index, ultimos_meses, label='Demanda histórica', linewidth=2)
+        plt.axhline(y=punto_reorden, color='r', linestyle='--', label='Punto de reorden')
+        plt.fill_betweenx(y=[punto_reorden - inventario_seguridad, punto_reorden + inventario_seguridad], 
+                         x=plt.xlim()[0], x1=plt.xlim()[1], color='green', alpha=0.2, label='Inventario seguridad')
+        
+        plt.title(f'Punto de Reorden Óptimo - {producto}')
+        plt.xlabel('Fecha')
+        plt.ylabel('Demanda')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f'punto_reorden_{producto}.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        return {
+            'punto_reorden': punto_reorden,
+            'inventario_seguridad': inventario_seguridad,
+            'inventario_optimo': inventario_optimo,
+            'costo_almacenamiento': costo_total_almacenamiento,
+            'costo_rotura': costo_esperado_rotura
+        }
+    
+    def generar_reporte_completo(self):
+        """
+        Genera un reporte completo con todos los análisis y resultados
+        """
+        print("Generando reporte completo...")
+        
+        # Crear resumen de métricas
+        metricas_df = pd.DataFrame.from_dict(self.metricas, orient='index')
+        metricas_df = metricas_df.round(2)
+        
+        print("\n" + "=" * 50)
+        print("REPORTE COMPLETO DE FORECAST DE INVENTARIO")
+        print("=" * 50)
+        print("\nMétricas de rendimiento por producto:")
+        print(metricas_df)
+        
+        # Visualizar comparación de métricas
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        metricas_df['MAE'].plot(kind='bar', ax=axes[0], color='skyblue')
+        axes[0].set_title('MAE por Producto')
+        axes[0].set_ylabel('MAE')
+        axes[0].tick_params(axis='x', rotation=45)
+        
+        metricas_df['RMSE'].plot(kind='bar', ax=axes[1], color='lightcoral')
+        axes[1].set_title('RMSE por Producto')
+        axes[1].set_ylabel('RMSE')
+        axes[1].tick_params(axis='x', rotation=45)
+        
+        metricas_df['MAPE'].plot(kind='bar', ax=axes[2], color='lightgreen')
+        axes[2].set_title('MAPE por Producto')
+        axes[2].set_ylabel('MAPE (%)')
+        axes[2].tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        plt.savefig('metricas_comparacion.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        # Calcular ahorros estimados
+        costo_almacenamiento_actual = 100000  # Valor ejemplo
+        reduccion_estimada = 0.15  # 15% de reducción
+        
+        ahorro_estimado = costo_almacenamiento_actual * reduccion_estimada
+        reduccion_rotura_estimada = 0.30  # 30% de reducción en roturas
+        
+        print(f"\nBENEFICIOS EMPRESARIALES ESTIMADOS:")
+        print(f"- Reducción de costos de almacenamiento: {ahorro_estimado:.2f} € ({reduccion_estimada*100}%)")
+        print(f"- Reducción de roturas de stock: {reduccion_rotura_estimada*100}%")
+        print(f"- Mejora en la satisfacción del cliente")
+        print(f"- Optimización del capital de trabajo")
+        
+        # Guardar reporte en archivo
+        with open('reporte_forecast.txt', 'w') as f:
+            f.write("REPORTE DE SISTEMA DE FORECAST DE INVENTARIO\n")
+            f.write("=" * 50 + "\n\n")
+            f.write("Métricas de rendimiento:\n")
+            f.write(metricas_df.to_string())
+            f.write(f"\n\nBeneficios estimados:\n")
+            f.write(f"- Ahorro en costos de almacenamiento: {ahorro_estimado:.2f} €\n")
+            f.write(f"- Reducción de roturas de stock: {reduccion_rotura_estimada*100}%\n")
+        
+        print("\nReporte guardado en 'reporte_forecast.txt'")
+
+# Función principal
+def main():
+    """
+    Función principal para ejecutar el sistema completo
+    """
+    # Inicializar el sistema
+    sistema = ForecastInventario()
+    
+    # Cargar datos (o generar de ejemplo)
+    datos = sistema.cargar_datos()  # Sin parámetros para usar datos de ejemplo
+    
+    # Explorar datos
+    sistema.explorar_datos()
+    
+    # Analizar y modelar cada producto
+    for producto in datos['producto'].unique():
+        print(f"\n{'='*60}")
+        print(f"PROCESANDO: {producto}")
+        print(f"{'='*60}")
+        
+        # Análisis de series temporales
+        serie, es_estacionaria = sistema.analizar_series_temporales(producto)
+        
+        # Entrenar modelo ARIMA
+        sistema.entrenar_modelo_arima(producto)
+        
+        # Entrenar modelo SARIMAX (para comparación)
+        sistema.entrenar_modelo_sarimax(producto)
+        
+        # Hacer pronóstico futuro (usando el último modelo entrenado, SARIMAX)
+        pronostico_df = sistema.hacer_pronostico_futuro(producto, semanas=12, modelo_tipo='sarimax')
+        
+        # Optimizar inventario
+        optimizacion = sistema.optimizar_inventario(producto)
+    
+    # Generar reporte completo
+    sistema.generar_reporte_completo()
+    
+    print("\n¡Proceso completado! Revise los gráficos y reportes generados.")
+
+if __name__ == "__main__":
+    main()

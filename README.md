@@ -1,6 +1,6 @@
 # 📊 Portfolio de Analítica de Datos - Lari Casartelli
 
-![Portada](portfolio_cover.png)
+![Portada](forecast_example.png)
 
 ![Python](https://img.shields.io/badge/Python-3.10-blue)
 ![Data Analysis](https://img.shields.io/badge/Data%20Analysis-Pandas%2C%20NumPy-orange)
@@ -15,7 +15,7 @@ Graduada en Contabilidad, con experiencia en **control de inventario, facturaci�
 Apasionada por la **analítica de datos** y la mejora de procesos mediante tecnología.  
 En transición hacia un **perfil híbrido contabilidad–data analytics**, con enfoque en optimización de costes y eficiencia operativa.  
 
-📎 **[LinkedIn - Lari Casartelli](http://linkedin.com/in/larissacasartelli)**  
+📎 **[LinkedIn - Lari Casartelli](http://linkedin.com/in/larissacasartelli)**           
 
 ---
 
@@ -57,9 +57,5 @@ En transición hacia un **perfil híbrido contabilidad–data analytics**, con e
 - [ ] Crear script de automatización para Forecast de Inventario.
 - [ ] Incorporar test unitarios con `pytest`.
 - [ ] Dockerizar los proyectos para despliegue rápido.
-- [ ] Traducir README y documentación al inglés.
 
 ---
-
-## 📄 Licencia
-Este proyecto está bajo la licencia **MIT**. Consulta el archivo [LICENSE](LICENSE) para más detalles.
